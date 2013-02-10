@@ -1,0 +1,5 @@
+#!/bin/sh
+
+DIR="/home/yaws/www/docs/howto"
+
+/usr/bin/xsltproc --novalid ${DIR}/guide.xsl $1 > $2

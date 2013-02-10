@@ -1,0 +1,1577 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<link title="new" rel="stylesheet" href="css/main.css" type="text/css">
+<link REL="shortcut icon" HREF="favicon.ico" TYPE="image/x-icon">
+<title>Erlang HowTo 
+  Documentation
+-- 
+  Writing an Erlang Port using OTP Principles</title>
+</head>
+<body style="margin-left:0px;margin-top:0px;" bgcolor="#ffffff"><table width="100%" border="0" cellspacing="0" cellpadding="0">
+<tr><td valign="top" height="125" bgcolor="#6699ff"><table cellspacing="0" cellpadding="0" border="0" width="193">
+<tr><td class="logobg" valign="top" align="center" height="88"><a href="/"><img border="0" src="images/trapexit.gif" alt="trapexit.org Logo"></a></td></tr>
+<tr><td class="logobg" valign="top" align="center" height="36"><a href="/"></a></td></tr>
+</table></td></tr>
+<tr><td valign="top" align="right" colspan="1" bgcolor="#ffffff"><table border="0" cellspacing="0" cellpadding="0" width="100%"><tr>
+<td width="99%" class="content" valign="top" align="left">
+<br><p class="dochead">Writing an Erlang Port using OTP Principles</p>
+<form name="contents" action="http://www.gentoo.org">
+<b>Contents</b>:
+    <select name="url" size="1" OnChange="location.href=form.url.options[form.url.selectedIndex].value" style="font-family:Arial,Helvetica, sans-serif; font-size:10"><option value="#doc_chap1">1. Overview</option>
+<option value="#doc_chap2">2. External Python Echo Server</option>
+<option value="#doc_chap3">3. Client API</option>
+<option value="#doc_chap4">4. Gen_server and the Port</option>
+<option value="#doc_chap5">5. Supervisor</option>
+<option value="#doc_chap6">6. Application</option>
+<option value="#doc_chap7">7. Running the Application</option>
+<option value="#doc_chap8">8. Release and Boot Script</option>
+<option value="#doc_chap9">9. Conclusion</option></select>
+</form>
+<p class="chaphead"><span class="chapnum"><a name="doc_chap1">1. </a></span>Overview</p>
+<p class="secthead"><a name="doc_chap1_sect1">Introduction </a></p>
+        <p>
+          There are several different mechanisms that are available
+          when trying to make Erlang interact with the external world.
+          These are described in the official Erlang documentation in
+          the <a href="http://erlang.se/doc/doc-5.4.12/doc/tutorial/part_frame.html">Interoperability Tutorial</a>.  This is a tutorial on how to
+          use one of those techniques, the Erlang port.  The source
+          code for the tutorial can be found here: <a href="http://www.kazmier.com/computer/port-howto.tar.gz">port-howto.tar.gz</a>
+        </p>
+        <p>
+          The tutorial demonstrates how to communicate to an external
+          program using a standard Erlang port.  A simple echo server,
+          written in Python, will be used in the example.  The port
+          will enable us to send Erlang messages to the echo server
+          via its standard input and standard output.  The echo server
+          will read data from standard input and echo it back, along
+          with a time stamp, to our Erlang port.
+        </p>
+        <p>
+          In addition, the example utilizes several standard OTP
+          behaviors such as gen_servers, supervisors, and applications
+          for completeness.  We want to ensure that our application is
+          robust in the event that the external echo server crashes or
+          does not respond in a timely manner.  The use of standard
+          OTP behaviors enables us to do so with minimal effort.
+        </p>
+      <p class="secthead"><a name="doc_chap1_sect2">The Big Picture </a></p>
+        <p>
+          A high-level overview of the components is presented in this
+          section.  It is intended to be the road map for the rest of
+          the document.  Subsequent chapters provide additional detail
+          on each of the components as well as the source code for
+          each.  Lets begin with a diagram illustrating the big
+          picture.
+        </p>
+        <br><a name="doc_chap1_fig1"></a><table cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Figure 1.1: The Big Picture</p></td></tr>
+<tr><td align="center" bgcolor="#ddddff"><img src="http://www.kazmier.com/computer/port-howto/erlang_port.png" alt="Fig. 1: big picture"></td></tr>
+</table>
+<br>
+        <p>
+          The diagram depicts two OS-level processes, an Erlang
+          virtual machine and a Python interpreter, communicating with
+          each other using standard OS pipes via stdin and stdout.
+          These two processes are completely independent of each other
+          in all other respects and are treated individually by the
+          OS. On the other hand, all of the Erlang processes reside
+          within the same OS-level process, the Erlang virtual
+          machine.
+        </p>
+        <table class="ncontent" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td bgcolor="#bbffbb"><p class="note"><b>Note: </b>
+          An OS-level process should not be confused with an Erlang
+          process. 
+        </p></td></tr></table>
+        <p>
+          Within the Erlang virtual machine, there are three client
+          processes, a supervisor, a gen_server, and a port to the
+          external Python process.  You'll also notice that three of
+          the components have been co-located with each other in the
+          box labeled echo_app.  These components represent the OTP
+          application that we are going to be build.  The use of an OTP
+          application allows us to start and stop all of the processes
+          associated with our echo server as a single entity.  In
+          addition, it'll enable others to incorporate our application
+          in other systems with minimal effort.
+        </p>
+        <p>
+          Because we are implementing a centralized server that is
+          going to handle and respond to client requests, the use of
+          the OTP gen_server behavior will greatly simplify our
+          implementation.  The gen_server behavior provides a
+          framework for modeling client-server relationships where a
+          server is managing a resource that is going to be shared
+          between one or more clients.  In this case, the gen_server
+          will be responsible for managing access to the port that is
+          communicating with the external Python process.
+        </p>
+        <p>
+          Ports can be viewed as external Erlang processes.  They can
+          be used to communicate with external OS-level processes or
+          access any opened file descriptors in use by the Erlang VM.
+          Messages can be sent and received from ports just as if they
+          were any other Erlang process.  In this tutorial, messages
+          sent to the port will be sent to our external Python
+          process.  Likewise, when the Python process sends data to
+          the Erlang VM, a message will be sent back to the port's
+          controlling process, the process that opened the port. In
+          this implementation, the gen_server is responsible for the
+          opening and closing of the port.  This will ensure that all
+          messages sent from the port arrive at the gen_server
+          process.
+        </p>
+        <p>
+          By default, external processes spawned via the opening of an
+          port communicate to the Erlang VM via standard input and
+          standard output.  Our Python process will read lines of data
+          via its stdin, and then write responses back via stdout.
+        </p>
+        <table class="ncontent" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td bgcolor="#bbffbb"><p class="note"><b>Note: </b>
+          Care must be taken when communicating via OS-level pipes
+          using stdin and stdout as both streams are buffered by the C
+          stdio library.  More details will be described in the
+          chapter on the implementation of the Python echo server.
+        </p></td></tr></table>
+        <p>
+          Clients will use a specified API, <span class="code">echo/1</span>, to make
+          requests to our echo server.  By using this API, clients
+          will be insulated from the implementation details of our
+          echo server.  The client does not need to know it is
+          communicating with another process.  This allows us to
+          change our implementation later if we choose.
+        </p>
+        <p>
+          Finally, in order to provide a reliable service, we will
+          employ the use of a supervisor to monitor our gen_server
+          process.  Within the OTP framework, supervisors monitor the
+          behavior of worker processes, and can restart them in the
+          event something goes wrong.  As you will see, our gen_server
+          process is linked to the port, and as a result, if the port
+          (or the external Python process) terminates abnormally, our
+          gen_server process will also terminate, forcing the
+          supervisor to restart the gen_server and thus the external
+          Python process.
+        </p>
+        <p>
+          Subsequent chapters will explore each of these components
+          and their implementations in detail.  Before moving on, we
+          should take a brief moment to discuss the standard directory
+          layout of an OTP application and where each of the
+          components that are discussed in this tutorial should
+          reside.  Here is the layout for this project:
+        </p>
+        <a name="doc_chap1_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 1.1: Directory layout of the application</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+`-- echo_app-1.0
+    |-- ebin
+    |   |-- echo.beam
+    |   |-- echo_app.app
+    |   |-- echo_app.beam
+    |   `-- echo_sup.beam
+    |-- priv
+    |   `-- echo.py
+    `-- src
+        |-- echo.erl
+        |-- echo_app.erl
+        `-- echo_sup.erl
+        </pre></td></tr>
+</table>
+        <p>
+          All of the Erlang source code should reside in the
+          <span class="code">src</span> directory, the Python program should reside in
+          the <span class="code">priv</span> directory, and the compiled sources and
+          application definition file should be in the <span class="code">ebin</span>
+          directory.  It's now time to start digging into the details
+          of the tutorial.
+        </p>
+        <table class="ncontent" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td bgcolor="#bbffbb"><p class="note"><b>Note: </b>
+          Each chapter going forward begins with a discussion on the
+          design, followed by a section that walks through the actual
+          implementation.  The design section is meant to be read
+          without access to the source code.
+        </p></td></tr></table>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap2">2. </a></span>External Python Echo Server</p>
+<p class="secthead"><a name="doc_chap2_sect1">Design </a></p>
+        <p>
+          Lets start with the design of the external Python echo
+          server.  As the previous chapter already mentioned, the
+          Erlang VM will communicate with this process via an Erlang
+          port, which by default will use the standard input and
+          standard output of the Python process to communicate to the
+          port.  Requests will be processed one at a time, and will
+          yield a response before the next request is processed.
+          Communication is therefore synchronous.
+        </p>
+        <p>
+          There are a few things to consider when implementing our
+          external Python process.  First, we have decided to use the
+          standard IO mechanisms of Python which utilize the stdio
+          library.  Therefore, we must be aware that stdin and stdout
+          will be fully buffered because we are communicating with
+          Erlang via standard OS-level pipes.  For those that do not
+          recall, the stdio library uses line buffering on file
+          objects associated with a terminal device, and fully buffers
+          everything else with the exception that stderr is never
+          buffered.
+        </p>
+        <p>
+          The second item to consider is the communication protocol
+          used between the Erlang port and the Python process.
+          Although we have already decided that communication will
+          occur over stdin and stdout, we have yet to discuss the
+          exact format of the requests that will arrive on stdin, and
+          the exact format of the responses that will be sent back via
+          stdout.  We will explore this topic in the next section.
+        </p>
+        <p>
+          Third, what should we do in the event of an error?  Do we
+          try and write a robust Python server that catches every
+          single possible error?  Or do we let our Python process
+          terminate upon any error?  For the purpose of this tutorial,
+          we will allow our Python process to terminate upon any error
+          because we will design our Erlang port to terminate our
+          gen_server process which will then force the supervisor to
+          restart everything including the external Python process.
+          I'm new to Erlang, but it seems that this is the most common
+          approach to programming within Erlang, let things fail, and
+          let your supervisors correct the problem.
+        </p>
+        <p>
+          In the next section, the communication protocol between the
+          external server and port is discussed in detail.
+        </p>
+      <p class="secthead"><a name="doc_chap2_sect2">Communication Protocol </a></p>
+        <p>
+          The communication protocol used between our Erlang
+          application and this external Python process will be line
+          oriented.  Requests will arrive on stdin as a single line
+          per request.  The server will read and process one request
+          at a time.  After the request has been processed, one or
+          more lines will be sent back via stdout.  The Erlang process
+          must continue reading data from the process until a line
+          with a single <span class="code">OK</span> has been returned.  This will
+          indicate the end of the current response.
+        </p>
+        <p>
+          For the purpose of this tutorial, the Python server will
+          simply respond with three lines of data: the original
+          request, the current time, and a single <span class="code">OK</span>.  It
+          should be noted that we are not limited to three lines of
+          output, and that the protocol could be used with some other
+          process that adheres to it.  Here is a sample interaction
+          with the Python echo server (the emphasized lines are user
+          input):
+        </p>
+        <a name="doc_chap2_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 2.1: Sample Interaction with the Python Echo Server</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco:lib/echo_app-1.0/priv$ ./echo.py
+<span class="input">Hello there!</span>
+Received Hello there!
+Current time is Mon Jan 23 16:51:43 2006
+OK
+<span class="input">Is anyone home?</span>
+Received Is anyone home?
+Current time is Mon Jan 23 16:51:48 2006
+OK
+<span class="input">^D</span>  <span class="comment"># Control-D was pressed to close stdin</span>
+        </pre></td></tr>
+</table>
+        <p>
+          As you can see, the Python echo server lives up to its name.
+          It simply echoes back whatever it received along with some
+          additional data to make the example a little more
+          interesting by forcing us to read an arbitrary amount of
+          response data.  With that said, lets move on to the
+          implementation of the echo server.
+        </p>
+      <p class="secthead"><a name="doc_chap2_sect3">Implementation </a></p>
+        <p>
+          Here is the full implementation of the Python echo
+          server. Do not forget to place this source file in the
+          <span class="code">priv</span> directory of your directory layout.  Although
+          Python was chosen as the implementation language, even those
+          that are not familiar with Python should not have any
+          problem understanding this trivial program.
+        </p>
+        <a name="doc_chap2_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 2.2: Implementation of echo.py</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+#!/usr/bin/python
+
+import sys
+import time
+
+while 1:
+    line = sys.stdin.readline()
+    if not line: break
+
+    <span class="comment"># Send back the received line</span>
+    print "Received", line,
+
+    <span class="comment"># Lets send back the current time just so we have more than one
+    # line of output.</span>
+    print "Current time is", time.ctime()
+
+    <span class="comment"># Now send our terminating string to end the transaction.</span>
+    print "OK"
+
+    <span class="comment"># And finally, lets flush stdout because we are communicating with
+    # Erlang via a pipe which is normally fully buffered.</span>
+    sys.stdout.flush()
+        </pre></td></tr>
+</table>
+        <p>
+          As you can see, the Python process sits in a loop forever
+          reading one line at a time from stdin.  The line is then
+          echoed back along with a time stamp followed by our
+          terminator string.  There are two items of importance, both
+          of which deal with buffering issues.
+        </p>
+        <p>
+          First, note the call to <span class="code">sys.stdout.flush()</span>.  This
+          forces the stdio library to flush the current stdout
+          buffer.  It ensures that Erlang will receive a response to
+          the request.  If this was not provided, our Erlang server
+          may hang indefinitely if we did not code it in a robust
+          manner (which we will do to protect ourselves from this
+          scenario should it happen).
+        </p>
+        <p>
+          Second, which is a bit more subtle, and only of interest to
+          those that are familiar with Python's idiom of reading lines
+          for a file object.  The normal way to process one line at a
+          time is with the following idiom:
+        </p>
+        <a name="doc_chap2_pre3"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 2.3: Python Idiom for Reading Lines from a File Object</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+#!/usr/bin/python
+
+import sys
+
+for line in sys.stdin:
+    <span class="comment"># Do something with line here</span>
+    print line
+        </pre></td></tr>
+</table>
+        <p>
+          Python uses an internal buffering when reading from
+          file-object iterators such as the one above.  What does this
+          mean?  Even though the Erlang VM may have sent a line, the
+          Python process may be buffering it internally, thus blocking
+          forever.  This internal buffer can be avoided by using the
+          technique in our implementation of the Python echo server.
+          This ensures that Python has access to the data as soon as
+          Erlang sends it across the pipe.  Again, this is an
+          implementation note to those that may already know Python.
+        </p>
+      <p class="secthead"><a name="doc_chap2_sect4">An Aside </a></p>
+        <p>
+          Although the Python echo server is trivial, it was used as
+          an example because it could be easily replaced with any
+          number of other programs that follow the same communication
+          protocol.  One such example is <a href="http://www.rrdtool.org/">RRDTool</a> which happens
+          to be the author's original motivation for writing this
+          tutorial.  In fact, as you'll see, which external program to
+          be spawned can be specified as a system configuration
+          parameter to our OTP application.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap3">3. </a></span>Client API</p>
+<p class="secthead"><a name="doc_chap3_sect1">Design </a></p>
+        <p>
+          Clients will access the server through an API call to
+          <span class="code">echo:echo/1</span> instead of directly sending messages to
+          the gen_server.  The function takes a single string argument
+          which will eventually be processed by our external Python
+          echo server.  By providing an API call, we provide a layer
+          of indirection that will hide implementation details the
+          client need not be aware of.
+        </p>
+        <p>
+          This function will return a list of lists.  Each line of
+          output generated by our Python echo server will yield a list
+          of one or more strings depending on whether the line of
+          output exceeds the buffer size specified when the port is
+          opened.  This will be explained in more detail in the next
+          chapter.  Recall that the Python server sends back a line
+          containing the original request, as well as a line
+          containing the current time stamp.  Lets look at some output
+          from the use of <span class="code">echo:echo/1</span>:
+        </p>
+        <a name="doc_chap3_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 3.1: Sample Output of Client API</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco$ <span class="input">erl -boot echo -boot_var MYAPPS ~/port_example</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">echo:echo("This is a test of the emergency broadcast system\n").</span>
+[["Received This is a test of the emergency broadcast system"],
+ ["Current time is Wed Jan 25 11:13:40 2006"]]
+2&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          You may be wondering why the function simply does not return
+          a list of strings instead.  The reason, as hinted above, is
+          due to the buffer size associated with the port.  If the
+          Python server sends back a line that is longer than this
+          buffer, the gen_server will send back multiple strings per
+          line.  Lets take a look at the same example, but this time
+          we'll start our application with a different buffer size:
+        </p>
+        <a name="doc_chap3_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 3.2: Sample Output Using a Small Port Buffer</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco$ <span class="input">erl -boot echo -boot_var MYAPPS ~/port_example -echo_app maxline 20</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">echo:echo("This is a test of the emergency broadcast system\n").</span>
+[["Received This is a t","est of the emergency"," broadcast system"],
+ ["Current time is Wed ","Jan 25 14:15:36 2006"]]
+2&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          And now you can see why a list of lists is returned instead
+          of a list of strings.  Why return an unflattened list of
+          strings?  It appears that this is a common idiom in Erlang
+          for performance reasons.  This is not a problem because most
+          of the IO routines can operate on them as is.  For example, to
+          print out the responses sent back from the server:
+        </p>
+        <a name="doc_chap3_pre3"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 3.3: Printing out the Results</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+2&gt; <span class="input">Result = echo:echo("This is a test of the emergency broadcast system\n").</span>
+[["Received This is a t","est of the emergency"," broadcast system"],
+ ["Current time is Wed ","Jan 25 14:27:33 2006"]]
+3&gt; <span class="input">Print = fun(Line) -&gt; io:format("~s~n", [Line]) end.</span>
+#Fun&lt;erl_eval.6.43886099&gt;
+4&gt; <span class="input">lists:foreach(Print, Result).</span>
+Received This is a test of the emergency broadcast system
+Current time is Wed Jan 25 14:27:33 2006
+ok
+5&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          Although we hide the implementation of our server from the
+          client by providing an API, there are a few details that we
+          must enumerate.  First, what happens if our server process
+          does not send a response in a timely manner?  If we do
+          nothing, the client could end up waiting indefinitely.
+          Clearly, this is a less than ideal situation.  For this
+          reason, it is imperative that we use a timeout when waiting
+          for a response.  As it turns out, the OTP folks have already
+          thought of this and have provided the appropriate mechanism
+          in <span class="code">gen_server:call/3</span>, which is used to make a
+          synchronous call to a gen_server.  The last argument of that
+          function specifies the amount of time to wait for a response
+          before a timeout occurs.  We'll see this in the next
+          section.
+        </p>
+        <p>
+          And second, what happens if the client sends a request that
+          is not terminated with a newline?  The external Python
+          server reads data from its standard input one line at a
+          time.  If a request arrives that is not properly terminated,
+          the Python server will hang until another request eventually
+          arrives from another client that is terminated with a
+          newline.  And, what about when a request contains more than
+          one newline?  The Python server will send back multiple
+          responses, which will arrive at the gen_server which is
+          expecting only a single response.  We will deal with both of
+          these issues before the request is ever sent to the
+          gen_server.
+        </p>
+        <p>
+          Lets move on to the implementation and see how all of these
+          issues are dealt with in the code.
+        </p>
+      <p class="secthead"><a name="doc_chap3_sect2">Implementation </a></p>
+        <p>
+          The implementation of the client API is provided in the same
+          module as our gen_server code (this is considered good
+          coding style within the Erlang community).  Rather than
+          present the entire module here, which we have not discussed
+          yet, only the relevant portions will be extracted.  The rest
+          of the module will be presented in the next chapter when the
+          implementation of the gen_server is discussed.  
+        </p>
+        <a name="doc_chap3_pre4"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 3.4: Client API implementation</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+-module(echo).
+-author('pete-trapexit@kazmier.com').
+
+<span class="comment">%% API functions</span>
+-export([echo/1]).
+
+echo(Msg) -&gt;
+    ValidMsg1 = case is_newline_terminated(Msg) of
+                    true  -&gt; Msg;
+                    false -&gt; erlang:error(badarg)
+                end,
+    ValidMsg2 = case count_chars(ValidMsg1, $\n) of
+                    1     -&gt; ValidMsg1;
+                    _     -&gt; erlang:error(badarg)
+                end,
+    
+    gen_server:call(?MODULE, {echo, ValidMsg2}, get_timeout()).
+
+get_timeout() -&gt;
+    {ok, Value} = application:get_env(echo_app, timeout),
+    Value.
+
+is_newline_terminated([])    -&gt; false;
+is_newline_terminated([$\n]) -&gt; true;
+is_newline_terminated([_|T]) -&gt; is_newline_terminated(T).
+    
+count_chars(String, Char) -&gt;
+    length([X || X &lt;- String, X == Char]).
+        </pre></td></tr>
+</table>
+        <p>
+          Both issues described above have been addressed in this
+          implementation.  First, the argument to <span class="code">echo:echo/1</span>
+          is checked to ensure that it is valid, containing only a
+          single terminating newline.  If the argument is not valid,
+          an error is thrown with a reason of <span class="code">badarg</span>.  This
+          prevents the possibility that the external Python server
+          will hang forever waiting for a terminating newline, and
+          will prevent the server from sending multiple responses for
+          a single request.
+        </p>
+        <p>
+          Second, the call to <span class="code">gen_server:call/3</span> is passed a
+          timeout value, which is pulled from our application's
+          configuration variables (the same mechanism that let us
+          change the buffer size on the command line in the previous
+          section).  These variables are described in more detail in a
+          subsequent chapter on the OTP application implementation.
+          The timeout value ensures the client does not block forever
+          while waiting for a response from the server.  Note the
+          format of the gen_server request, <span class="code">{echo, Msg}</span>, as it
+          will be used later when matching function clauses in the
+          implementation of the gen_server.
+        </p>
+        <p>
+          That completes the implementation of the client API. Clients
+          can now use it to invoke the services of our external Python
+          echo server.  The next chapter describes the heart of our
+          architecture, the implementation of the gen_server and the
+          port.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap4">4. </a></span>Gen_server and the Port</p>
+<p class="secthead"><a name="doc_chap4_sect1">Design </a></p>
+        <p>
+          It's now time to turn our attention to the crux of the
+          architecture, the gen_server process.  Erlang's gen_server
+          behavior module provides a framework to simplify the
+          development of client-server applications.  In the context
+          of this tutorial, clients make requests to the server in
+          order to obtain access to the external Python echo server.
+          It is the responsibility of the gen_server process to
+          mediate this interaction.
+        </p>
+        <p>
+          By implementing this behavior, the programmer is agreeing to
+          provide implementations for several callback functions that
+          are invoked during the life cycle of the gen_server process.
+          These callback functions are described below:
+        </p>
+        <ul>
+          <li>
+<span class="code">init/1</span><br>
+            This function is called whenever the gen_server process
+            has been started by calling either <span class="code">gen_server:start</span>
+            or <span class="code">gen_server:start_link</span>.  It should be noted that
+            this function is executed in a new gen_server process that
+            is spawned, and not the process that called the previous
+            two functions.
+          </li>
+
+          <li>
+<span class="code">handle_call/3</span><br>
+            This function is called to handle the arrival of a
+            synchronous request whenever a client makes a call using
+            <span class="code">gen_server:call</span> which we do in our implementation
+            of <span class="code">echo/1</span>.  The gen_server is expected to return a
+            response to the requester.  It is this callback where we
+            will process client requests.
+          </li>
+
+          <li>
+<span class="code">handle_cast/2</span><br>
+            This function is called to handle the arrival of an
+            asynchronous request whenever a client makes a call using
+            <span class="code">gen_server:cast</span>.  The gen_server process does not
+            send a response to the client in this callback.  This
+            callback is not used in our implementation, but we'll
+            provide an implementation anyways to play nicely with the
+            OTP framework.
+          </li>
+
+          <li>
+<span class="code">handle_info/2</span><br>
+            This function is called to handle the arrival of any other
+            messages to the gen_server.  In our implementation, we
+            will take advantage of this callback to monitor the status
+            of our port and external Python server.  Should the
+            external server fail, a message will be sent to the
+            controlling process, our gen_server.  This is the callback
+            that will process that message.
+          </li>
+
+          <li>
+<span class="code">terminate/2</span><br>
+            This function is called whenever the gen_server is about
+            to terminate as long as the gen_server has been set to
+            trap exit signals.  In our scenario, termination might be
+            initiated by the gen_server itself should it detect an
+            error with the external Python server, or it might be
+            terminated in response to our supervisor instructing it to
+            shutdown.
+          </li>
+
+          <li>
+<span class="code">code_change/3</span><br>
+            This function is used during release upgrades and
+            downgrades.  We do not implement this feature of the OTP
+            library and thus we only provide a default implementation
+            to play nicely with the rest of the framework.
+          </li>
+        </ul>
+
+        <p>
+          When our gen_server is initialized, it will open the port to
+          the external Python server.  By opening the port in the
+          gen_server process, we are ensuring that all errors that
+          arise with the port are sent back to our gen_server process
+          (which are handled via the <span class="code">gen_server:handle_info/2</span>
+          callback) so it can take appropriate action.  Once the port
+          is opened in <span class="code">init/1</span>, it is passed around as the state
+          of the gen_server.  This enables us to access the port in
+          any of the callback functions.
+        </p>
+        <p>
+          Ports can be opened with a list of options that control the
+          behavior of the port.  All of these are described in the
+          <span class="code">erlang:open_port/2</span> man page.  We will only require
+          the use of two of them (and one of those is actually a
+          default):
+        </p>
+        <ul>
+          <li>
+<span class="code">stream</span><br>
+            This option specifies that output messages are sent
+            without packet lengths.  By using this option, we must
+            define our own protocol between Erlang and the external
+            process.  This was described in detail in a previous
+            chapter.  It should be noted that this option is default
+            when opening a stream.
+          </li>
+          <li>
+<span class="code">{line, L}</span><br>
+            This option specifies that messages are delivered on a
+            per-line basis.  <span class="code">L</span> is the maximum line length.
+            Lines that exceed this length will be delivered in
+            multiple messages.  The format of the messages is
+            <span class="code">{data, {Flag, Line}}</span>, where <span class="code">Flag</span> is either
+            <span class="code">eol</span> or <span class="code">noeol</span> depending on whether or not the
+            maximum line length has been exceeded.  If the line length
+            has been exceeded, all but the last message will set
+            <span class="code">Flag</span> to <span class="code">noeol</span>.
+          </li>
+        </ul>
+        <p>
+          After the initialization of the gen_server and the port is
+          completed, processing of client requests entails the sending
+          of a command to the port along the argument that was passed
+          to <span class="code">echo/1</span> as data.  The command is then sent to the
+          external Python server via stdin.  While the Python server
+          is processing the request, the gen_server will block until a
+          response has been sent back from the port, or until a
+          timeout occurs.  Once the Python process sends a response to
+          stdout, the Erlang VM delivers it to our gen_server as one
+          or more messages from the port.
+        </p>
+        <p>
+          In reality, at the minimum, it requires three messages: one
+          for the line containing the echoed response, one for the
+          line with the time stamp, and one for the final <span class="code">OK</span>
+          line.  It could be more if any of the lines exceed the
+          maximum line length.  Lets look at the message flow from a
+          port that has been opened with <span class="code">{line, 45}</span>.  If the
+          Python process sends the following data:
+        </p>
+        <a name="doc_chap4_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.1: Lines sent by the Python server</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+Received some data
+Fri Jan 27 09:55:52 EST 2006
+OK
+        </pre></td></tr>
+</table>
+        <p>
+          The port will send the following three messages:
+        </p>
+        <a name="doc_chap4_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.2: Messages sent by the port</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+{data, {eol, "Received some data"}}
+{data, {eol, "Current time is Fri Jan 27 09:55:52 EST 2006"}}
+{data, {eol, "OK"}}
+        </pre></td></tr>
+</table>
+        <p>
+          However, if the Python process sends:
+        </p>
+        <a name="doc_chap4_pre3"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.3: Lines sent by the Python server</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+Received some data as well as some extraneous garbage for illustration
+Fri Jan 27 09:55:52 EST 2006
+OK
+        </pre></td></tr>
+</table>
+        <p>
+          The port will send the following four messages:
+        </p>
+        <a name="doc_chap4_pre4"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.4: Messages sent by the port</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+{data, {noeol, "Received some data as well as some extraneous"}}
+{data, {eol, "garbage for illustration"}}
+{data, {eol, "Current time is Fri Jan 27 09:55:52 EST 2006"}}
+{data, {eol, "OK"}}
+        </pre></td></tr>
+</table>
+        <p>
+          An extra message is sent this time because the line length
+          exceeded the maximum size of the buffer.  We must code for
+          this scenario.
+        </p>
+        <p>
+          Now that we have discussed the message passing between the
+          port and the gen_server, lets discuss what happens in the
+          event of an error.  There are two error conditions that must
+          be addressed.  First, what should be done in the event the
+          Python process terminates?  And second, what should we do if
+          the Python process takes too long to respond?  The answer is
+          surprisingly simple.  In both cases, the error condition in
+          detected in the gen_server process, and then the process is
+          terminated.
+        </p>
+        <p>
+          That may not sound very robust at first glance.  However,
+          our implementation utilizes another standard OTP behavior:
+          the supervisor.  It is the job of the supervisor to monitor
+          the livelihood of the gen_server process.  Should the
+          process terminate for any reason, the supervisor will simply
+          start a new gen_server process to replace the old one.  And
+          after the gen_server has initialized, a new Python server
+          would have been spawned and ready to process requests sent
+          by clients via the gen_server.
+        </p>
+        <p>
+          In this section, you have learned how the gen_server
+          communicates with clients and the callbacks used to process
+          the requests.  Likewise, you also learned how the gen_server
+          communicates with the Python process via a standard Erlang
+          port.  Finally, we discussed what happens when something
+          goes wrong.  In the next section, the implementation of the
+          gen_server is presented.
+        </p>
+     <p class="secthead"><a name="doc_chap4_sect2">Implementation </a></p>
+        <p>
+          Now that you have read about the design of the gen_server
+          process, it is now time to move on to the implementation.
+          Rather than present the entire module as a whole, it is
+          broken down into functional pieces.  In addition, the client
+          API implementation has been left out as it was already
+          discussed.  If you prefer, the entire source can be found in
+          the tarball of the entire source tree.
+        </p>
+        <p>
+          Without further delay, lets start with the module attributes
+          and data structures used throughout the gen_server process:
+        </p>
+        <a name="doc_chap4_pre5"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.5: Gen_server module attributes</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+-module(echo).
+-behavior(gen_server).
+
+<span class="comment">%% External exports</span>
+-export([start_link/1]).
+
+<span class="comment">%% API functions</span>
+-export([echo/1]).
+
+<span class="comment">%% gen_server callbacks</span>
+-export([init/1, 
+         handle_call/3,
+         handle_cast/2, 
+         handle_info/2,
+         code_change/3,
+         terminate/2]).
+
+<span class="comment">%% Server state</span>
+-record(state, {port}).
+        </pre></td></tr>
+</table>
+        <p>
+          As you can see, nothing complicated here.  The only part
+          worth commenting on is the record that is used to represent
+          the server state.  Since there is only a single field in the
+          record, one could argue that the usefulness of the record is
+          zero.  However, by using the record, it becomes trivial to
+          add an additional piece of state later to the implementation
+          without the need to change code in several places.
+        </p>
+        <p>
+          The next set of functions are used when starting the
+          gen_server process:
+        </p>
+        <a name="doc_chap4_pre6"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.6: Gen_server startup</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+start_link(ExtProg) -&gt;
+    gen_server:start_link({local, ?MODULE}, echo, ExtProg, []).
+
+init(ExtProg) -&gt;
+    process_flag(trap_exit, true),
+    Port = open_port({spawn, ExtProg}, [stream, {line, get_maxline()}]),
+    {ok, #state{port = Port}}.
+
+get_maxline() -&gt;
+    {ok, Value} = application:get_env(echo_app, maxline),
+    Value.
+        </pre></td></tr>
+</table>
+        <p>
+          Although we have not discussed the supervisor in detail yet,
+          <span class="code">start_link/1</span> is called by the supervisor to start the
+          gen_server process.  Then <span class="code">gen_server:start_link/4</span>
+          eventually invokes the <span class="code">init/1</span> callback in our
+          gen_server after a new process has been spawned by the
+          supervisor.  This new process is linked to the supervisor,
+          which allows the supervisor the ability to monitor the
+          status of the gen_server.
+        </p>
+        <p>
+          The port is created when <span class="code">init/1</span> is called during the
+          start up of the gen_server.  The name of the external program
+          to start is passed as an argument.  This will be specified
+          by the application module which is discussed later.  The
+          list of port options should look familiar.  The maximum line
+          length is supplied by querying the application configuration
+          parameters (again, discussed later in the application
+          chapter).
+        </p>
+        <p>
+          It is important to note that the gen_server is trapping
+          exits.  This enables <span class="code">terminate/2</span> to be invoked when
+          the gen_server is about to terminate.  If the process does
+          not trap flags, it will not be called when the supervisor
+          orders it to terminate.
+        </p>
+        <p>
+          Now, lets move on to the heart of the gen_server, the
+          processing of client requests.  Here is the code:
+        </p>
+        <a name="doc_chap4_pre7"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.7: Gen_server processing of client requests</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+handle_call({echo, Msg}, _From, #state{port = Port} = State) -&gt;
+    port_command(Port, Msg),
+    case collect_response(Port) of
+        {response, Response} -&gt; 
+            {reply, Response, State};
+        timeout -&gt; 
+            {stop, port_timeout, State}
+    end.
+
+collect_response(Port) -&gt;
+    collect_response(Port, [], []).
+
+collect_response(Port, RespAcc, LineAcc) -&gt;
+    receive
+        {Port, {data, {eol, "OK"}}} -&gt;
+            {response, lists:reverse(RespAcc)};
+
+        {Port, {data, {eol, Result}}} -&gt;
+            Line = lists:reverse([Result | LineAcc]),
+            collect_response(Port, [Line | RespAcc], []);
+
+        {Port, {data, {noeol, Result}}} -&gt;
+            collect_response(Port, RespAcc, [Result | LineAcc])
+
+    <span class="comment">%% Prevent the gen_server from hanging indefinitely in case the
+    %% spawned process is taking too long processing the request.</span>
+    after get_timeout() -&gt; 
+            timeout
+    end.
+
+get_timeout() -&gt;
+    {ok, Value} = application:get_env(echo_app, timeout),
+    Value.
+        </pre></td></tr>
+</table>
+        <p>
+          If you recall, <span class="code">handle_call/3</span> is invoked when the
+          gen_server receives a request from a client.  The
+          appropriate clause is matched based on the request that was
+          sent by <span class="code">gen_server:call/3</span> in the client API.  In this
+          case, the request from <span class="code">echo:echo/1</span> is <span class="code">{echo,
+          Msg}</span>.  Upon receipt of the request, the gen_server sends
+          a command to the port via the built-in function
+          <span class="code">port_command/2</span>, and then collects the response, if
+          any, that was sent back from the port.  Alternatively, one
+          could send a message of the form <span class="code">{command, Data}</span> to
+          the port using <span class="code">!</span> syntax instead of calling
+          <span class="code">port_command/2</span>.  Only the handling of errors is
+          different between the two forms.  See the online
+          documentation for <a href="http://erlang.se/doc/doc-5.4.12/lib/kernel-2.10.12/doc/html/erlang.html"><span class="code">port_command/2</span></a>
+          for additional details..
+        </p>
+        <p>
+          The port's various types of messages are collected into a
+          single response that can be sent back to the client.  If a
+          response is returned, the callback returns <span class="code">{reply,
+          Response, State}</span> which instructs the gen_server to send
+          the response to the client that had originally invoked
+          <span class="code">gen_server:call/3</span>.  However, if a timeout has
+          occurred, then the callback returns <span class="code">{stop, port_timeout,
+          State}</span>.  This instructs the gen_server to terminate and
+          invoke the <span class="code">terminate/2</span> callback function with an
+          argument of <span class="code">port_timeout</span> which is defined next:
+        </p>
+        <a name="doc_chap4_pre8"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.8: Gen_server termination</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+handle_info({'EXIT', Port, Reason}, #state{port = Port} = State) -&gt;
+    {stop, {port_terminated, Reason}, State}.
+
+terminate({port_terminated, _Reason}, _State) -&gt;
+    ok;
+terminate(_Reason, #state{port = Port} = _State) -&gt;
+    port_close(Port).
+        </pre></td></tr>
+</table>
+        <p>
+          Recall, if the Python server terminates for any reason, the
+          port sends an exit message back to the gen_server.  We
+          handle this message with the <span class="code">handle_info/2</span> callback
+          which returns <span class="code">{stop, {port_terminated, Reason},
+          State}</span>.  Again, this instructs the gen_server to
+          terminate and call the appropriate <span class="code">terminate/2</span>
+          clause.  Notice that two clauses have been specified in our
+          implementation of <span class="code">terminate/2</span>.  The first clause
+          matches if the external Python process terminated.  There is
+          no need to close the port in this case as it's already been
+          closed.  However, if a timeout occurred or any other
+          unforeseen error occurred, we explicitly close the port
+          thereby terminating the external Python process as well.
+          And when the gen_server terminates, its supervisor will
+          simply start a new one (more details on this later).
+        </p>
+        <p>
+          Finally, for completeness, here are the last two callback
+          functions that are not utilized in our tutorial.  Default
+          implementations are provided for each:
+        </p>
+        <a name="doc_chap4_pre9"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 4.9: Gen_server unused callbacks</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+handle_cast(_Msg, State) -&gt;
+    {noreply, State}.
+
+code_change(_OldVsn, State, _Extra) -&gt;
+    {ok, State}.
+        </pre></td></tr>
+</table>
+        <p>
+          That concludes the implementation of the gen_server.  In the
+          next section, the role and implementation of the supervisor
+          is discussed.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap5">5. </a></span>Supervisor</p>
+<p class="secthead"><a name="doc_chap5_sect1">Design and Implementation </a></p>
+        <p>
+          In the previous chapter, you learned that our gen_server
+          process may terminate for a variety of reasons.  Should the
+          process die, it is the responsibility of the supervisor to
+          detect and take appropriate action such as restarting it.
+          Due to the simplicity of our application, a single
+          supervisor will be sufficient to monitor the lone worker,
+          the gen_server process.  In terms of a hierarchy, the
+          supervisor sits above the worker overseeing its behavior.  A
+          supervisor may in turn monitor another supervisor, and so
+          forth.  This hierarchical structure of supervisors and
+          workers is referred to as a supervision tree.  Supervision
+          trees allow us to design fault-tolerant and robust software
+          systems.
+        </p>
+        <p>
+          A supervisor is a behavior, and we must implement its
+          callback functions just as we did with the gen_server
+          behavior in the previous chapter.  Fortunately, this
+          behavior only requires the implementation of a single
+          callback function, <span class="code">init/1</span>.  This callback is called
+          by <span class="code">supervisor:start_link</span> which is used to start and
+          create the supervisor by the OTP application (as you'll see
+          in the next section).  The return value of the callback
+          specifies the supervisor's restart strategy, maximum restart
+          frequency, and the list of children to be supervised. This
+          is represented by the the following tuple: <span class="code">{ok,
+          {{RestartStrategy, MaxR, MaxT}, [ChildSpec]}}</span>. The
+          details of which can be found in the <a href="http://erlang.se/doc/doc-5.4.12/doc/design_principles/sup_princ.html#5.2">OTP Design Principles</a>
+          guide.
+        </p>
+        <p>
+          Here is the implementation of the supervisor:
+        </p>
+        <a name="doc_chap5_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 5.1: Supervisor implementation echo_sup.erl</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+-module(echo_sup).
+-behavior(supervisor).
+
+%% External exports
+-export([start_link/1]).
+
+%% supervisor callbacks
+-export([init/1]).
+
+start_link(ExtProg) -&gt;
+    supervisor:start_link(echo_sup, ExtProg).
+
+init(ExtProg) -&gt;
+    {ok, {{one_for_one, 3, 10},
+          [{echo, {echo, start_link, [ExtProg]},
+            permanent, 10, worker, [echo]}]}}.
+        </pre></td></tr>
+</table>
+        <p>
+          For this tutorial, we will use a <span class="code">one_for_one</span> restart
+          strategy.  This strategy instructs the supervisor to restart
+          only the process that has terminated.  Other strategies
+          exist that instruct the supervisor to restart all processes
+          if one terminates.  In our supervision tree, there is only a
+          single worker, so the choice of restart strategy is not as
+          important as it would be if there were multiple workers.  As
+          for the maximum restart frequency, a safeguard to prevent
+          the supervisor from continuously spawning a misbehaving
+          worker, a frequency of no more than 3 times (<span class="code">MaxR</span>) in
+          10 seconds (<span class="code">MaxT</span>) will be used.
+        </p>
+        <p>
+          The return value of <span class="code">init/1</span> also includes a list of
+          child specifications for each of the workers it is supposed
+          to supervise.  The specification is a tuple that includes an
+          id, start function (tuple of module, function, and initial
+          arguments), restart type (<span class="code">permanent</span>,
+          <span class="code">temporary</span>, or <span class="code">transient</span>), shutdown timeout,
+          role (<span class="code">worker</span> or <span class="code">supervisor</span>), and a list
+          containing the name of the callback module.
+        </p>
+        <p>
+          We'll specify a a restart type of <span class="code">permanent</span> for our
+          gen_server.  This instructs the supervisor to restart the
+          process each time it exits unless it has exceeded the
+          maximum restart frequency.  If you recall the gen_server
+          implementation, <span class="code">echo:start_link/1</span> was provided for
+          the supervisor to invoke, and thus is specified as the start
+          up function.  Also notice the name of the external program
+          that the port will start, <span class="code">ExtProg</span>, is passed by the
+          caller of <span class="code">echo_sup:start_link/1</span> which originates from
+          the application as you'll see in the next chapter.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap6">6. </a></span>Application</p>
+<p class="secthead"><a name="doc_chap6_sect1">Design and Implementation </a></p>
+        <p>
+          Within the OTP framework, the standard method of bundling
+          one's code into a reusable component which can be started
+          and stopped as a single entity is called an application.
+          Not all applications require starting and stopping, it is
+          quite possible to have an application that only provides a
+          library of functions.  This type of application is called a
+          library application.  In the context of this tutorial, we do
+          require the starting and stopping of our application which
+          consists of the supervisor process, gen_server process, and
+          the port.  By creating an application, it will be easy for
+          others to incorporate our application into their own OTP
+          applications.  For more information on applications, please
+          refer to the <a href="http://erlang.se/doc/doc-5.4.12/doc/design_principles/applications.html#7">OTP Design Principles</a> guide.
+        </p>
+        <p>
+          Again, like the supervisor and gen_server before that, an
+          application is implemented as a callback module.  This
+          callback module is relatively trivial compared to that of
+          the gen_server.  It requires the implementation of two
+          callback functions: <span class="code">start/2</span> and <span class="code">stop/1</span>.  When
+          the application is started, it is expected to return a state
+          value and the pid of the topmost supervisor of the
+          supervision tree.  The arguments to <span class="code">start/2</span> and
+          <span class="code">stop/1</span> are not used in this tutorial so we can safely
+          ignore them.  Lets take a look at the implementation of the
+          application:
+        </p>
+        <a name="doc_chap6_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 6.1: Application implementation echo_app.erl</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+-module(echo_app).
+
+-behavior(application).
+
+%% application callbacks
+-export([start/2, 
+         stop/1]).
+
+start(_Type, _Args) -&gt;
+    PrivDir = code:priv_dir(echo_app),
+    {ok, ExtProg} = application:get_env(echo_app, extprog),
+    echo_sup:start_link(filename:join([PrivDir, ExtProg])).
+
+stop(_State) -&gt;
+    ok.
+        </pre></td></tr>
+</table>
+        <p>
+          The implementation of both callbacks is trivial.  In order
+          to start the topmost supervisor, our application callback
+          module invokes <span class="code">echo_sup:start_link/1</span> which returns
+          <span class="code">{ok, Pid}</span>.  This is passed back as the return value
+          of <span class="code">start/2</span> since it adheres to the contract of that
+          callback function.  As you may have also noticed, the name
+          of the external program to be spawned is obtained by
+          querying the application's environment (or configuration
+          variables).  These variables can be defined in several
+          places: an application resource file (discussed below), a
+          system configuration file (not discussed), or passed on the
+          command line (discussed in the next chapter).  In addition,
+          the path to the executable is created by retrieving the path
+          to our application's <span class="code">priv</span> directory using the
+          <span class="code">code:priv_dir/1</span> built-in function.
+        </p>
+        <p>
+          The final step in creating the application is to define an
+          application resource file which is a file that contains one
+          tuple of the form <span class="code">{application, ApplicationName,
+          [Options]}</span>.  This tuple is used to specify metadata
+          about the application such as dependencies, version,
+          description, configuration variables, etc.  This is the
+          application resource file used for our application.
+        </p>
+        <a name="doc_chap6_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 6.2: Application echo_app.app file</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+{application, echo_app,
+ [{description, "Echo Port Server"},
+  {vsn, "1.0"},
+  {modules, [echo_app, echo_sup, echo]},
+  {registered, [echo]},
+  {applications, [kernel, stdlib]},
+  {mod, {echo_app, []}},
+  {env, [{extprog, "echo.py"}, {timeout, 3000}, {maxline, 100}]}
+ ]}.
+        </pre></td></tr>
+</table>
+        <table class="ncontent" width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td bgcolor="#bbffbb"><p class="note"><b>Note: </b>
+          The name of this file must be the same as the name of the
+          application which is defined by the second element of the
+          tuple.  However, the file should have the suffix of
+          <span class="code">.app</span>.  For example, if the second element is
+          <span class="code">echo_app</span>, then the name of the resource file must be
+          <span class="code">echo_app.app</span>.  The file must also be placed in the
+          <span class="code">ebin</span> directory, not the <span class="code">src</span> directory.
+        </p></td></tr></table>
+        <p>
+          Here is the list of options that were defined and a brief
+          explanation of each:
+        </p>
+        <ul>
+          <li>
+<span class="code">description</span><br>
+            A brief description of the application.  This is used when
+            querying the system about loaded and started applications.
+          </li>
+          <li>
+<span class="code">vsn</span><br>
+            A version number as a string.
+          </li>
+          <li>
+<span class="code">modules</span><br>
+            A list of modules that are part of this application.  We
+            created three separate modules, one for the gen_server,
+            one for the supervisor, and one for the application.  All
+            must be listed.
+          </li>
+          <li>
+<span class="code">registered</span><br>
+            A list of all registered processes used by our
+            application.  It is used by the system to help identify
+            naming conflicts between processes.
+          </li>
+          <li>
+<span class="code">applications</span><br>
+            A list of all applications that our application is
+            dependent upon.  At the very least, all applications must
+            list <span class="code">kernel</span> and <span class="code">stdlib</span> as dependencies.
+            Aside from the standard applications, no others are
+            required for our application.
+          </li>
+          <li>
+<span class="code">mod</span><br>
+            Specifies the name of the application callback module and
+            arguments to be passed to the <span class="code">start/2</span> callback
+            function.  The module name does not have to be the same
+            name as the name of the application; however, in this
+            example, the application callback module does use the same
+            name as the application itself.
+          </li>
+          <li>
+<span class="code">env</span><br>
+            A list of configuration parameters or variables to be used
+            as defaults.  These parameters can be queried via
+            <span class="code">application:get_env/2</span>.  In addition, they may also
+            be overridden by a system configuration file or command
+            line arguments.  You should recognize the three parameters
+            specified here as they were used throughout the
+            implementation.
+          </li>
+        </ul>
+        <p>
+          With the application callback module defined, and the
+          application resource file created, you are now ready to
+          build and run the application.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap7">7. </a></span>Running the Application</p>
+<p class="secthead"><a name="doc_chap7_sect1">Building the Application </a></p>
+        <p>
+          Obviously, before we can run the application, we must make
+          sure that it has been compiled.  Assuming you've already
+          unpacked the tarball in a directory, precompiled beam files
+          already exist in the <span class="code">ebin</span> directory.  However, if you
+          do want to build the code yourself, you might do so as
+          follows: 
+        </p>
+        <a name="doc_chap7_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 7.1: Building the source</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco:~/port_example/lib/echo_app-1.0/src$ erlc -W -o ../ebin *.erl
+        </pre></td></tr>
+</table>
+        <p>
+          It is important to make sure that all compiled files end up
+          in the <span class="code">ebin</span> directory and not the <span class="code">src</span>
+          directory otherwise Erlang will not be able to find them at
+          runtime.  If the code built without errors (it should), you
+          are now ready to start and test the application.
+        </p>
+      <p class="secthead"><a name="doc_chap7_sect2">Starting the Application </a></p>
+        <p>
+          As stated earlier, the starting and stopping of our
+          application can be done as a single unit.  This is achieved
+          by using <span class="code">application:start/1</span> and
+          <span class="code">application:stop/1</span>.  These functions search for the
+          specified application in the default system path.  If your
+          application does not reside in the system path, then Erlang
+          will not be able to locate the code or the application
+          resource file.  Rather than pollute the system path with our
+          non-system code, we can specify an additional search path
+          when starting the Erlang VM using the <span class="code">-pa</span> command
+          line argument.  Lets take a look and see how all of this
+          fits together (remember that we called our application
+          <span class="code">echo_app</span>).
+        </p>
+        <a name="doc_chap7_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 7.2: Starting and stopping the application</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco:/tmp$ <span class="input">erl -pa ~/port_example/lib/echo_app-1.0/ebin</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">application:start(echo_app).</span>
+ok
+2&gt; <span class="input">application:loaded_applications().</span>
+[{kernel,"ERTS  CXC 138 10","2.10.7"},
+ {stdlib,"ERTS  CXC 138 10","1.13.7"},
+ {echo_app,"Echo Port Server","1.0"}]
+3&gt; <span class="input">echo:echo("Testing\n").</span>
+[["Received Testing"],["Current time is Mon Jan 30 17:15:43 2006"]]
+4&gt; <span class="input">application:stop(echo_app).</span>
+
+=INFO REPORT==== 30-Jan-2006::17:15:50 ===
+    application: echo_app
+    exited: stopped
+    type: temporary
+ok
+5&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          As you can see, starting and stopping the application is
+          very easy.  Once the application has been loaded, we can use
+          the client API that was defined to send requests to the
+          gen_server, which then sends the request to the external
+          Python program for processing.  Even more interesting is
+          testing what happens if the external Python process is
+          killed.
+        </p>
+        <a name="doc_chap7_pre3"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 7.3: Killing the Python process</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+5&gt; <span class="input">os:cmd("pkill echo.py").</span>
+
+=ERROR REPORT==== 30-Jan-2006::17:39:59 ===
+** Generic server echo terminating
+** Last message in was {'EXIT',#Port&lt;0.96&gt;,normal}
+** When Server state == {state,#Port&lt;0.96&gt;}
+** Reason for termination ==
+** {port_terminated,normal}
+[]
+6&gt; <span class="input">echo:echo("Testing\n").</span>
+[["Received Testing"],["Current time is Mon Jan 30 17:40:11 2006"]]
+7&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          After the external Python process was killed, the gen_server
+          process terminated abnormally with <span class="code">{port_terminated,
+          normal}</span> just as it was designed to do.  When the
+          supervisor received the termination notice, it started
+          another gen_server process to replace the old one, which in
+          turn started up a new Python process ready to process
+          requests.  We were then able to use the client API to access
+          the services of the Python process again without having to
+          restart the application.
+        </p>
+        <p>
+          In the next chapter, you will learn how to start the
+          application using a boot script.  Upon startup of the Erlang
+          VM, our application will be available immediately for use.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap8">8. </a></span>Release and Boot Script</p>
+<p class="secthead"><a name="doc_chap8_sect1">Overview </a></p>
+        <p>
+          An OTP release is the bundling of one or more applications
+          together to form a single comprehensive system.  Creating a
+          release involves the creation of a boot script and/or a
+          tarball of the release that can be installed on another
+          target system.  With a boot script, you can start the Erlang
+          VM using the <span class="code">-boot</span> command line argument.  Upon
+          start up, all applications that are part of the release are
+          started and immediately available for use.  The boot script
+          will ensure that the correct ordering of start up among the
+          applications for you based on the dependencies that are
+          listed in the application definition files.
+        </p>
+        <p>
+          Creating a release for this tutorial is not very interesting
+          because we have no other applications to bundle in the
+          release that actually utilize the services our echo server.
+          However, building a release does enable us to create a boot
+          script to make the starting of our application even easier
+          because we will not have to call
+          <span class="code">application:start(echo_app)</span> once the VM has started.
+          This will be done by the boot script for us as we'll see in
+          a later section.
+        </p>
+        <p>
+          In this chapter, we will only generate a boot script and
+          provide some notes on how to start the application using the
+          boot script.  Creating a tarball or package of the release
+          is not discussed because I have yet to figure out how to
+          install one on a target system.  As for the brevity of this
+          chapter, the discussion is kept as brief as possible because
+          trapexit.org already contains a <a href="http://www.trapexit.org/docs/howto/release_handling_tutorial.html">tutorial</a> on how to create an
+          Erlang releases by Ulf Wiger.
+        </p>
+      <p class="secthead"><a name="doc_chap8_sect2">Creating the Boot Script </a></p>
+        <p>
+          In order to create a release, and thus our boot script, a
+          release resource file must first be created.  This file
+          specifies all of the applications and versions of those
+          applications that should be included in the release.  It may
+          seem as though our application has no dependencies; however,
+          this is not true.  All applications have a minimum
+          dependency on both the <span class="code">kernel</span> and <span class="code">stdlib</span>
+          applications so the release file must include both of them
+          as dependencies.
+        </p>
+        <p>
+          The release resource file should reside in a separate
+          release directory for your project.  If you look in the
+          tarball of this tutorial, you'll find the standard Erlang
+          directory layout that is used for releases.  In the
+          <span class="code">port_example/releases/1.0</span> directory, you'll find the
+          the release file called <span class="code">echo.rel</span>, and the boot
+          script that will be generated from it.  Here are the
+          contents of <span class="code">echo.rel</span>:
+        </p>
+        <a name="doc_chap8_pre1"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 8.1: Release resource file echo.rel</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+{release, {"Example Port Server", "1.0"}, {erts, "5.4.6"},
+ [{kernel, "2.10.7"},
+  {stdlib, "1.13.7"},
+  {echo_app, "1.0"}]}.
+        </pre></td></tr>
+</table>
+        <p>
+          Once the release file is in place, it's a simple matter to
+          create the boot script.  Start an Erlang session in the
+          following directory, <span class="code">port_example/releases/1.0</span>, and
+          type the following:
+        </p>
+        <a name="doc_chap8_pre2"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 8.2: Generating the boot script</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco:~/port_example/releases/1.0$ <span class="input">erl</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">Dir = "/home/kaz/port_example".</span>
+"/home/kaz/port_example"
+2&gt; <span class="input">Path = [Dir ++ "/lib/*/ebin"].</span>
+["/home/kaz/port_example/lib/*/ebin"]
+3&gt; <span class="input">Var = {"MYAPPS", Dir}.</span>
+{"MYAPPS","/home/kaz/port_example"}
+4&gt; <span class="input">systools:make_script("echo", [{path, [Path]}, {variables, [Var]}]).</span>
+ok
+5&gt; <span class="input">halt().</span>
+        </pre></td></tr>
+</table>
+        <p>
+          This will create two files in the current directory:
+          <span class="code">echo.boot</span> and <span class="code">echo.script</span>.  These are the
+          compiled and uncompiled boot scripts respectively.  We can
+          now use the compiled boot script to start an Erlang VM that
+          will automatically load our application and all of its
+          dependencies.  We'll use the <span class="code">-boot</span> and
+          <span class="code">-boot_var</span> command line arguments to do so.  Type the
+          following to start the application:
+        </p>
+        <a name="doc_chap8_pre3"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 8.3: Starting Erlang with the boot script</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+kaz@coco:~/port_example/releases/1.0$ <span class="input">erl -boot echo -boot_var MYAPPS ~/port_example</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">echo:echo("Testing\n").</span>
+[["Received Testing"],["Current time is Wed Feb  1 14:55:04 2006"]]
+2&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          As illustrated above, starting a system with a boot script
+          is simple.  Our echo application is immediately available
+          for use without having to manually start it or any of its
+          dependencies.
+        </p>
+        <p>
+          Before moving on to the next chapter, there are two points
+          of interest to be noted.  First, when using the boot script,
+          we can start up our system from any directory as long as the
+          correct paths are used.  And secondly, remember those
+          application configuration parameters (<span class="code">extprog</span>,
+          <span class="code">timeout</span>, and <span class="code">maxline</span>) that were specified in
+          the application resource file (<span class="code">echo_app.app</span>)?  Well,
+          they may be overridden on the command line.  For example:
+        </p>
+        <a name="doc_chap8_pre4"></a><table class="ntable" width="100%" cellspacing="0" cellpadding="0" border="0">
+<tr><td class="infohead" bgcolor="#7a5ada"><p class="caption">
+            Code listing 8.4: Overriding application parameters</p></td></tr>
+<tr><td bgcolor="#ddddff"><pre>
+$ <span class="input">erl -boot echo -boot_var MYAPPS ~/port_example -echo_app maxline 5</span>
+Erlang (BEAM) emulator version 5.4.6 [source] [threads:0]
+
+Eshell V5.4.6  (abort with ^G)
+1&gt; <span class="input">echo:echo("Testing\n").</span>
+[["Recei","ved T","estin","g"],
+ ["Curre","nt ti","me is"," Wed ","Feb  ","1 15:","06:46"," 2006"]]
+2&gt;
+        </pre></td></tr>
+</table>
+        <p>
+          For completeness, you should be made aware that the
+          parameters may also be overridden by a system configuration
+          file that can be specified using the <span class="code">-config</span> command
+          line argument.
+        </p>
+      <p class="chaphead"><span class="chapnum"><a name="doc_chap9">9. </a></span>Conclusion</p>
+<p class="secthead"><a name="doc_chap9_sect1">Some Closing Comments </a></p>
+        <p>
+          In this tutorial, you have hopefully learned how to use an
+          Erlang port to communicate to an external system, and along
+          the way learned how one might use some of the features that
+          OTP provides for simplifying development through the use of
+          standard behaviors as well as how to build robust software
+          using a supervisor.
+        </p>
+        <p>
+          Thanks for reading!
+        </p>
+      <br><tt>
+  The contents of this document are licensed under the <a href="http://creativecommons.org/licenses/by-sa/2.0">Creative Commons - Attribution / Share Alike</a> license.
+</tt><br>
+</td>
+<td width="1%" bgcolor="#dddaec" valign="top"><table border="0" cellspacing="5" cellpadding="0">
+<tr><td><img src="images/line.gif" alt="line"></td></tr>
+<tr><td align="center" class="alttext">
+                  Updated 2006-01-14</td></tr>
+<tr><td><img src="images/line.gif" alt="line"></td></tr>
+<tr><td class="alttext">  
+    <b><a class="altlink" href="mailto:pete-erlang-doc@kazmier.com">Pete Kazmier</a></b>
+  <br><i>Author</i><br><br>
+</td></tr>
+<tr><td><img src="images/line.gif" alt="line"></td></tr>
+<tr><td class="alttext">
+<b>Summary:</b> 
+    This guide shows you how to write an Erlang program that
+    communicates with an external Python echo server.  It will also
+    demonstrate the use of several Erlang concepts including ports,
+    gen_servers, supervisors, and applications.
+  </td></tr>
+<tr><td><img src="images/line.gif" alt="line"></td></tr>
+</table></td>
+</tr></table></td></tr>
+</table></body>
+</html>
