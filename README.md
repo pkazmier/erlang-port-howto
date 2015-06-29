@@ -9,6 +9,6 @@ familar with basic Erlang before reading this tutorial.
 The tutorial files are located in `lib/echo_app_1.0/doc` and the rendered
 HTML can be found here: [port-howto].
 
-[port-howto]: http://www.kazmier.com/computer/port-howto/
+[port-howto]: https://erlangcentral.org/wiki/index.php?title=Writing_an_Erlang_Port_using_OTP_Principles
 
 
